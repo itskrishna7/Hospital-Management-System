@@ -34,6 +34,9 @@ function daysAgo(days: number, hour = 10) {
 }
 
 async function main() {
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("The synthetic development seed cannot run in production.");
+  }
   const email = process.env.SEED_ADMIN_EMAIL ?? "admin@example.test";
   const password = process.env.SEED_ADMIN_PASSWORD;
   if (!password) throw new Error("SEED_ADMIN_PASSWORD must be configured for seeding.");

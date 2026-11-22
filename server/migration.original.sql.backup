@@ -1,0 +1,61 @@
+ALTER TYPE "Role" ADD VALUE IF NOT EXISTS 'SUPER_ADMIN';
+ALTER TYPE "Role" ADD VALUE IF NOT EXISTS 'HOSPITAL_ADMIN';
+ALTER TYPE "Role" ADD VALUE IF NOT EXISTS 'RADIOLOGIST';
+ALTER TYPE "Role" ADD VALUE IF NOT EXISTS 'ACCOUNTANT';
+ALTER TYPE "Role" ADD VALUE IF NOT EXISTS 'HOUSEKEEPING';
+ALTER TYPE "Role" ADD VALUE IF NOT EXISTS 'PATIENT';
+
+ALTER TABLE "User"
+  ADD COLUMN IF NOT EXISTS "mfaEnabled" BOOLEAN NOT NULL DEFAULT false,
+  ADD COLUMN IF NOT EXISTS "mfaSecretEncrypted" TEXT,
+  ADD COLUMN IF NOT EXISTS "lastPasswordChangeAt" TIMESTAMP(3);
+
+CREATE TABLE IF NOT EXISTS "Session" (
+  "id" TEXT NOT NULL,
+  "userId" TEXT NOT NULL,
+  "tokenHash" TEXT NOT NULL,
+  "expiresAt" TIMESTAMP(3) NOT NULL,
+  "revokedAt" TIMESTAMP(3),
+  "ipAddress" TEXT,
+  "userAgent" TEXT,
+  "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  "updatedAt" TIMESTAMP(3) NOT NULL,
+
+  CONSTRAINT "Session_pkey" PRIMARY KEY ("id")
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS "Session_tokenHash_key" ON "Session"("tokenHash");
+CREATE INDEX IF NOT EXISTS "Session_userId_expiresAt_idx" ON "Session"("userId", "expiresAt");
+
+CREATE TABLE IF NOT EXISTS "LoginHistory" (
+  "id" TEXT NOT NULL,
+  "userId" TEXT,
+  "email" TEXT NOT NULL,
+  "successful" BOOLEAN NOT NULL,
+  "failureReason" TEXT,
+  "ipAddress" TEXT,
+  "userAgent" TEXT,
+  "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+  CONSTRAINT "LoginHistory_pkey" PRIMARY KEY ("id")
+);
+
+CREATE INDEX IF NOT EXISTS "LoginHistory_email_createdAt_idx" ON "LoginHistory"("email", "createdAt");
+CREATE INDEX IF NOT EXISTS "LoginHistory_userId_createdAt_idx" ON "LoginHistory"("userId", "createdAt");
+
+ALTER TABLE "Session"
+  ADD CONSTRAINT "Session_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+ALTER TABLE "LoginHistory"
+  ADD CONSTRAINT "LoginHistory_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+
+ALTER TABLE "AuditLog"
+  ADD COLUMN IF NOT EXISTS "method" TEXT,
+  ADD COLUMN IF NOT EXISTS "route" TEXT,
+  ADD COLUMN IF NOT EXISTS "ipAddress" TEXT,
+  ADD COLUMN IF NOT EXISTS "userAgent" TEXT,
+  ADD COLUMN IF NOT EXISTS "correlationId" TEXT,
+  ADD COLUMN IF NOT EXISTS "success" BOOLEAN NOT NULL DEFAULT true,
+  ADD COLUMN IF NOT EXISTS "metadata" JSONB;
+
+CREATE INDEX IF NOT EXISTS "AuditLog_userId_createdAt_idx" ON "AuditLog"("userId", "createdAt");
