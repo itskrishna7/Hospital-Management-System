@@ -7,7 +7,12 @@
     },
     "server": {
       "root": "server",
-      "framework": "express"
+      "framework": "express",
+      "functions": {
+        "src/app.ts": {
+          "includeFiles": "src/package.json"
+        }
+      }
     }
   },
   "rewrites": [
