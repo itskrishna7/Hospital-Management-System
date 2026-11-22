@@ -2,6 +2,7 @@
   "name": "mediverse",
   "private": true,
   "version": "1.0.0",
+  "type": "module",
   "workspaces": ["client", "server"],
   "scripts": {
     "dev": "concurrently \"npm run dev --workspace server\" \"npm run dev --workspace client\"",
