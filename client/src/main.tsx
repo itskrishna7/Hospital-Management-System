@@ -7,7 +7,7 @@ import ClinicalWorkspace from "./clinical.js";
 import PortalWorkspace, { PatientFamilyInvitation, PatientPortalRegistration } from "./portal.js";
 import "./styles.css";
 
-const api = axios.create({ baseURL: import.meta.env.VITE_API_BASE_URL ?? "http://localhost:4000/api/v1", withCredentials: true });
+const api = axios.create({ baseURL: import.meta.env.VITE_API_BASE_URL || (import.meta.env.PROD ? "/api/v1" : "http://localhost:4000/api/v1"), withCredentials: true });
 const demoEnabled = import.meta.env.DEV && import.meta.env.VITE_APP_MODE !== "production";
 const queryClient = new QueryClient();
 api.interceptors.response.use(undefined, error => {
