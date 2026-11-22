@@ -616,3 +616,5 @@ app.use((error: unknown, _req: express.Request, res: express.Response, _next: ex
   console.error("API request failed", { name: errorName });
   res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "An unexpected error occurred" } });
 });
+
+export default app;
