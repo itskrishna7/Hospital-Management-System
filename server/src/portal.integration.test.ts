@@ -12,7 +12,7 @@ vi.mock("./notification-delivery.js", () => ({
   sendPortalEmail: vi.fn(async (to: string, subject: string, text: string) => { if (deliveries.failEmail) throw new Error("provider unavailable"); deliveries.email.push({ to, subject, text }); }),
 }));
 
-import { app } from "./app.js";
+import app from "./app.js";
 import { prisma } from "./db.js";
 
 const tag = `phase3${crypto.randomUUID().replaceAll("-", "").slice(0, 10)}`;

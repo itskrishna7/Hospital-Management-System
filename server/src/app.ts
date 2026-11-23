@@ -35,7 +35,7 @@ import {
 import { clinicalRouter } from "./clinical.js";
 import { portalRouter } from "./portal.js";
 
-export const app = express();
+const app = express();
 app.use(helmet());
 app.use(cors({ origin: env.CLIENT_ORIGIN, credentials: true }));
 app.use(express.json({ limit: "1mb" }));
@@ -617,4 +617,4 @@ app.use((error: unknown, _req: express.Request, res: express.Response, _next: ex
   res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "An unexpected error occurred" } });
 });
 
-export default app;
+export = app;

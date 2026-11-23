@@ -5,7 +5,7 @@ import type { AddressInfo } from "node:net";
 import bcrypt from "bcryptjs";
 import { Role } from "@prisma/client";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { app } from "./app.js";
+import app from "./app.js";
 import { prisma } from "./db.js";
 import { hashToken } from "./auth.js";
 import { createTotpCode, hashRecoveryCode } from "./mfa.js";
