@@ -10,5 +10,6 @@ const schema = z.object({
   SESSION_SECRET: z.string().min(32),
   RESEND_API_KEY: z.string().optional(),
   RESEND_FROM: z.string().optional(),
+  CRON_SECRET: z.string().min(32).optional(),
 });
 export const env = schema.parse(process.env);

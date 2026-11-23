@@ -7,7 +7,7 @@
     "dev": "tsx watch src/server.ts",
     "build": "prisma generate && tsc -p tsconfig.json",
     "start": "node dist/server.js",
-    "test": "vitest run src",
+    "test": "vitest run src --maxWorkers=1 --testTimeout=60000",
     "prisma:migrate": "prisma migrate dev",
     "prisma:deploy": "prisma migrate deploy",
     "prisma:neon:status": "node scripts/neon-prisma.mjs status",

@@ -23,5 +23,11 @@
         "service": "client"
       }
     }
+  ],
+  "crons": [
+    {
+      "path": "/api/v1/internal/cron/process-outbox",
+      "schedule": "0 0 * * *"
+    }
   ]
 }

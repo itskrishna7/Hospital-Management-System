@@ -29,7 +29,7 @@ async function doctorDepartment(userId: string) {
   return prisma.doctor.findUnique({ where: { userId }, select: { departmentId: true } });
 }
 
-async function patientIsAccessible(userId: string, role: Role, patientId: string, requireActiveAdmission = true) {
+export async function patientIsAccessible(userId: string, role: Role, patientId: string, requireActiveAdmission = true) {
   if (role === Role.DOCTOR) {
     const doctor = await doctorDepartment(userId);
     if (!doctor) return "DOCTOR_PROFILE_REQUIRED";
@@ -307,14 +307,17 @@ clinicalRouter.post("/clinical/records/:id/sign", requireAuth, requireRole(...cl
     const confirmation = z.object({ reviewConfirmed: z.literal(true) }).parse(req.body);
     const record = await prisma.clinicalRecord.findUnique({ where: { id: String(req.params.id) } });
     if (!record) return clinicalError(res, 404, "CLINICAL_RECORD_NOT_FOUND", "The clinical record was not found.");
-    if (record.status !== ClinicalRecordStatus.DRAFT || !canAuthorRecord(req.auth!.role, record.type)) {
-      return clinicalError(res, 403, "CLINICAL_SIGN_FORBIDDEN", "Your clinical role cannot sign this record.");
-    }
     const access = await patientIsAccessible(req.auth!.userId, req.auth!.role, record.patientId, record.type === ClinicalRecordType.NURSING_NOTE);
     if (access !== "ALLOWED") return clinicalError(res, access === "DOCTOR_PROFILE_REQUIRED" ? 403 : 404, access, "The patient is outside your clinical scope.");
+    if (!canAuthorRecord(req.auth!.role, record.type) || record.authoredById !== req.auth!.userId) {
+      return clinicalError(res, 403, "CLINICAL_SIGN_FORBIDDEN", "Only the authorized author may sign this record.");
+    }
+    if (record.status !== ClinicalRecordStatus.DRAFT) {
+      return clinicalError(res, 409, "CLINICAL_RECORD_IMMUTABLE", "Only an unsigned draft can be signed.");
+    }
     const signed = await prisma.$transaction(async (tx) => {
       const updated = await tx.clinicalRecord.updateMany({
-        where: { id: record.id, status: ClinicalRecordStatus.DRAFT },
+        where: { id: record.id, authoredById: req.auth!.userId, status: ClinicalRecordStatus.DRAFT },
         data: { status: ClinicalRecordStatus.SIGNED, signedById: req.auth!.userId, signedAt: new Date() },
       });
       if (updated.count !== 1) return null;
@@ -339,11 +342,14 @@ clinicalRouter.post("/clinical/records/:id/amend", requireAuth, requireRole(...c
     }).parse(req.body);
     const previous = await prisma.clinicalRecord.findUnique({ where: { id: String(req.params.id) } });
     if (!previous) return clinicalError(res, 404, "CLINICAL_RECORD_NOT_FOUND", "The clinical record was not found.");
-    if (previous.status !== ClinicalRecordStatus.SIGNED || !canAuthorRecord(req.auth!.role, previous.type)) {
-      return clinicalError(res, 409, "CLINICAL_AMENDMENT_FORBIDDEN", "Only an authorized clinician may amend a signed record.");
-    }
     const access = await patientIsAccessible(req.auth!.userId, req.auth!.role, previous.patientId, previous.type === ClinicalRecordType.NURSING_NOTE);
     if (access !== "ALLOWED") return clinicalError(res, access === "DOCTOR_PROFILE_REQUIRED" ? 403 : 404, access, "The patient is outside your clinical scope.");
+    if (!canAuthorRecord(req.auth!.role, previous.type) || previous.authoredById !== req.auth!.userId) {
+      return clinicalError(res, 403, "CLINICAL_AMENDMENT_FORBIDDEN", "Only the authorized original author may amend this record.");
+    }
+    if (previous.status !== ClinicalRecordStatus.SIGNED) {
+      return clinicalError(res, 409, "CLINICAL_AMENDMENT_FORBIDDEN", "Only a signed record may be amended.");
+    }
     const data = input.structuredData ?? (previous.structuredData as Record<string, unknown>);
     const dataError = await validateStructuredData(previous.type, data);
     if (dataError) return clinicalError(res, 400, "INVALID_CLINICAL_FIELDS", dataError);
@@ -605,12 +611,15 @@ clinicalRouter.post("/prescriptions/:id/sign", requireAuth, requireRole(Role.DOC
     const doctor = await doctorDepartment(req.auth!.userId);
     if (!doctor) return clinicalError(res, 403, "DOCTOR_PROFILE_REQUIRED", "A doctor profile is required to authorize prescriptions.");
     if (prescription.patient.departmentId !== doctor.departmentId) return clinicalError(res, 404, "PRESCRIPTION_NOT_FOUND", "The prescription was not found.");
+    if (prescription.prescribedById !== req.auth!.userId) {
+      return clinicalError(res, 403, "PRESCRIPTION_SIGN_FORBIDDEN", "Only the prescribing doctor may sign this draft.");
+    }
     if (prescription.status !== PrescriptionStatus.DRAFT) return clinicalError(res, 409, "PRESCRIPTION_IMMUTABLE", "Only a draft prescription can be signed.");
     const formularyError = await validatePrescriptionItems(prescription.items);
     if (formularyError) return clinicalError(res, 409, "FORMULARY_CHANGED", "The formulary configuration changed; review the prescription before signing.");
     const signed = await prisma.$transaction(async (tx) => {
       const changed = await tx.prescription.updateMany({
-        where: { id: prescription.id, status: PrescriptionStatus.DRAFT },
+        where: { id: prescription.id, prescribedById: req.auth!.userId, status: PrescriptionStatus.DRAFT },
         data: { status: PrescriptionStatus.SIGNED, signedById: req.auth!.userId, signedAt: new Date() },
       });
       if (changed.count !== 1) return null;

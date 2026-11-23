@@ -13,6 +13,7 @@ const runId = `phase2-${tag}`;
 const password = "Phase-Two-Integration-Password-2026!";
 const emails = {
   doctor: `${tag}-doctor@example.test`,
+  otherDoctor: `${tag}-other-doctor@example.test`,
   nurse: `${tag}-nurse@example.test`,
   admin: `${tag}-admin@example.test`,
   receptionist: `${tag}-receptionist@example.test`,
@@ -82,8 +83,9 @@ describe("Phase 2 clinical-care PostgreSQL integration", () => {
     const department = await prisma.department.create({ data: { name: `Phase 2 ${tag}` } });
     departmentId = department.id;
     const passwordHash = await bcrypt.hash(password, 12);
-    const [doctor, nurse, admin, receptionist, pharmacist] = await Promise.all([
+    const [doctor, otherDoctor, nurse, admin, receptionist, pharmacist] = await Promise.all([
       prisma.user.create({ data: { email: emails.doctor, name: "Phase 2 Doctor", role: Role.DOCTOR, passwordHash } }),
+      prisma.user.create({ data: { email: emails.otherDoctor, name: "Phase 2 Other Doctor", role: Role.DOCTOR, passwordHash } }),
       prisma.user.create({ data: { email: emails.nurse, name: "Phase 2 Nurse", role: Role.NURSE, passwordHash } }),
       prisma.user.create({ data: { email: emails.admin, name: "Phase 2 Admin", role: Role.ADMIN, passwordHash } }),
       prisma.user.create({ data: { email: emails.receptionist, name: "Phase 2 Receptionist", role: Role.RECEPTIONIST, passwordHash } }),
@@ -94,6 +96,7 @@ describe("Phase 2 clinical-care PostgreSQL integration", () => {
     receptionistId = receptionist.id;
     pharmacistId = pharmacist.id;
     await prisma.doctor.create({ data: { userId: doctor.id, departmentId, specialty: "Integration testing" } });
+    await prisma.doctor.create({ data: { userId: otherDoctor.id, departmentId, specialty: "Integration testing" } });
     const patient = await prisma.patient.create({
       data: {
         patientNumber: `TST-${tag}`,
@@ -159,6 +162,7 @@ describe("Phase 2 clinical-care PostgreSQL integration", () => {
     expect(field.response.status).toBe(201);
 
     const doctorCookie = await login(emails.doctor);
+    const otherDoctorCookie = await login(emails.otherDoctor);
     const nurseCookie = await login(emails.nurse);
     const forbiddenType = await request("/clinical/records", "POST", {
       patientId,
@@ -193,6 +197,8 @@ describe("Phase 2 clinical-care PostgreSQL integration", () => {
     const nurseSign = await request(`/clinical/records/${revised.payload.data.id}/sign`, "POST", { reviewConfirmed: true }, nurseCookie);
     expect(nurseSign.response.status).toBe(403);
     expect((await request(`/clinical/records/${revised.payload.data.id}/sign`, "POST", {}, doctorCookie)).response.status).toBe(400);
+    const otherDoctorSign = await request(`/clinical/records/${revised.payload.data.id}/sign`, "POST", { reviewConfirmed: true }, otherDoctorCookie);
+    expect(otherDoctorSign.response.status).toBe(403);
     const signed = await request(`/clinical/records/${revised.payload.data.id}/sign`, "POST", { reviewConfirmed: true }, doctorCookie);
     expect(signed.response.status).toBe(200);
     expect(signed.payload.data.status).toBe("SIGNED");
@@ -202,6 +208,11 @@ describe("Phase 2 clinical-care PostgreSQL integration", () => {
       structuredData: { [fieldKey]: "value_a" },
     }, doctorCookie)).response.status).toBe(409);
 
+    const otherDoctorAmendment = await request(`/clinical/records/${revised.payload.data.id}/amend`, "POST", {
+      reason: "Correction based on clinician review.",
+      narrative: "Attempted amendment by another clinician.",
+    }, otherDoctorCookie);
+    expect(otherDoctorAmendment.response.status).toBe(403);
     const amendment = await request(`/clinical/records/${revised.payload.data.id}/amend`, "POST", {
       reason: "Correction based on clinician review.",
       narrative: "Amended clinician-authored note.",
@@ -227,6 +238,7 @@ describe("Phase 2 clinical-care PostgreSQL integration", () => {
     medicineId = medicine.payload.data.id;
 
     const doctorCookie = await login(emails.doctor);
+    const otherDoctorCookie = await login(emails.otherDoctor);
     const invalid = await request("/prescriptions", "POST", {
       patientId,
       items: [{
@@ -270,6 +282,7 @@ describe("Phase 2 clinical-care PostgreSQL integration", () => {
     const nurseCookie = await login(emails.nurse);
     expect((await request(`/prescriptions/${draft.payload.data.id}/sign`, "POST", { reviewConfirmed: true }, nurseCookie)).response.status).toBe(403);
     expect((await request(`/prescriptions/${draft.payload.data.id}/sign`, "POST", {}, doctorCookie)).response.status).toBe(400);
+    expect((await request(`/prescriptions/${draft.payload.data.id}/sign`, "POST", { reviewConfirmed: true }, otherDoctorCookie)).response.status).toBe(403);
     expect((await request(`/prescriptions/${draft.payload.data.id}/sign`, "POST", { reviewConfirmed: true }, doctorCookie)).response.status).toBe(200);
 
     const listed = await request(`/prescriptions?patientId=${patientId}`, "GET", undefined, pharmacistCookie);

@@ -7,6 +7,7 @@ import { auditLogData, getClientIp, hashToken, requireAuth, requireRole, type Au
 import { env } from "./config/env.js";
 import { prisma } from "./db.js";
 import { DeliveryUnavailableError, sendPortalEmail } from "./notification-delivery.js";
+import { enqueuePortalNotification, processOutboxTree, retryNotificationDelivery } from "./reliable-events.js";
 
 export const portalRouter = Router();
 
@@ -51,70 +52,6 @@ async function getAccessiblePatient(userId: string, patientId: string, scope: Po
     include: { patient: true },
   });
   return grant ? { patient: grant.patient, delegated: true } : null;
-}
-
-async function createPortalNotification(patientId: string, category: string, title: string, message: string) {
-  const familyScopes = category === "APPOINTMENT"
-    ? [PortalAccessScope.APPOINTMENTS]
-    : [PortalAccessScope.APPOINTMENTS, PortalAccessScope.JOURNEY];
-  const familyGrants = await prisma.patientAccessGrant.findMany({
-    where: { patientId, revokedAt: null, expiresAt: { gt: new Date() }, scopes: { hasSome: familyScopes } },
-    select: { granteeUserId: true, grantee: { select: { active: true } } },
-  });
-  const familyUserIds = [...new Set(familyGrants.filter((grant) => grant.grantee.active).map((grant) => grant.granteeUserId))];
-  for (const userId of familyUserIds) {
-    const preference = await prisma.portalNotificationPreference.upsert({
-      where: { userId },
-      create: { userId },
-      update: {},
-    });
-    if (preference.inAppEnabled) {
-      await prisma.portalNotification.create({ data: { userId, category, title, message } });
-    }
-  }
-  const patient = await prisma.patient.findUnique({
-    where: { id: patientId },
-    select: { portalUserId: true },
-  });
-  if (!patient?.portalUserId) return [];
-  const user = await prisma.user.findUnique({
-    where: { id: patient.portalUserId },
-    select: { id: true, email: true, emailVerifiedAt: true },
-  });
-  if (!user) return [];
-  const preferences = await prisma.portalNotificationPreference.upsert({
-    where: { userId: user.id },
-    create: { userId: user.id },
-    update: { smsEnabled: false },
-  });
-  if (!preferences.inAppEnabled && !preferences.emailEnabled) return [];
-  const notification = await prisma.portalNotification.create({ data: { userId: user.id, category, title, message } });
-  const requested: Array<{ destination: string; body: string }> = [];
-  if (preferences.emailEnabled && user.emailVerifiedAt) {
-    requested.push({ destination: user.email, body: `${message}\nSign in to MediVerse to view details.` });
-  }
-  const results: Array<{ channel: NotificationChannel; status: NotificationDeliveryStatus }> = [];
-  for (const delivery of requested) {
-    const row = await prisma.notificationDelivery.create({
-      data: { notificationId: notification.id, channel: NotificationChannel.EMAIL, destination: delivery.destination, attempts: 1 },
-    });
-    try {
-      await sendPortalEmail(delivery.destination, title, delivery.body);
-      await prisma.notificationDelivery.update({
-        where: { id: row.id },
-        data: { status: NotificationDeliveryStatus.SENT, sentAt: new Date() },
-      });
-      results.push({ channel: NotificationChannel.EMAIL, status: NotificationDeliveryStatus.SENT });
-    } catch (error) {
-      const lastError = error instanceof DeliveryUnavailableError ? error.message : "The configured delivery provider rejected the request.";
-      await prisma.notificationDelivery.update({
-        where: { id: row.id },
-        data: { status: NotificationDeliveryStatus.FAILED, lastError: lastError.slice(0, 200) },
-      });
-      results.push({ channel: NotificationChannel.EMAIL, status: NotificationDeliveryStatus.FAILED });
-    }
-  }
-  return results;
 }
 
 function addRegistrationChallengeResponse(res: Response, challengeId: string) {
@@ -642,11 +579,18 @@ portalRouter.post("/portal/appointments", requireAuth, portalRole, async (req: A
         select: { id: true, startsAt: true, endsAt: true, status: true },
       });
       await tx.auditLog.create({ data: auditData(req, req.auth!.userId, { action: "BOOK", entity: "PORTAL_APPOINTMENT", entityId: created.id, metadata: { patientId: access.patient.id, delegated: access.delegated } }) });
-      return { kind: "booked" as const, appointment: created };
+      const eventId = await enqueuePortalNotification(tx, {
+        idempotencyKey: `appointment-booked:${created.id}`,
+        patientId: access.patient.id,
+        category: "APPOINTMENT",
+        title: "Appointment scheduled",
+        message: "An appointment has been scheduled in your MediVerse portal.",
+      });
+      return { kind: "booked" as const, appointment: created, eventId };
     }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
     if (booking.kind === "unavailable") return portalError(res, 404, "DOCTOR_NOT_AVAILABLE", "The selected clinician is not currently on duty.");
     if (booking.kind === "conflict") return portalError(res, 409, "APPOINTMENT_TIME_UNAVAILABLE", "The patient or clinician already has an appointment at the selected time.");
-    const notifications = await createPortalNotification(access.patient.id, "APPOINTMENT", "Appointment scheduled", "An appointment has been scheduled in your MediVerse portal.");
+    const notifications = await processOutboxTree(booking.eventId);
     res.status(201).json({ data: { appointment: booking.appointment, notificationDelivery: notifications } });
   } catch (error) {
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2034") {
@@ -661,18 +605,28 @@ portalRouter.patch("/portal/appointments/:id/cancel", requireAuth, portalRole, a
     const input = z.object({ patientId: z.string().min(1) }).parse(req.body);
     const access = await getAccessiblePatient(req.auth!.userId, input.patientId, PortalAccessScope.APPOINTMENTS);
     if (!access) return portalError(res, 404, "APPOINTMENT_NOT_FOUND", "The appointment was not found.");
-    const changed = await prisma.appointment.updateMany({
-      where: {
-        id: String(req.params.id),
+    const eventId = await prisma.$transaction(async (tx) => {
+      const changed = await tx.appointment.updateMany({
+        where: {
+          id: String(req.params.id),
+          patientId: access.patient.id,
+          status: { in: [AppointmentStatus.SCHEDULED, AppointmentStatus.CONFIRMED] },
+          startsAt: { gt: new Date() },
+        },
+        data: { status: AppointmentStatus.CANCELLED },
+      });
+      if (changed.count !== 1) return null;
+      await tx.auditLog.create({ data: auditData(req, req.auth!.userId, { action: "CANCEL", entity: "PORTAL_APPOINTMENT", entityId: String(req.params.id), metadata: { patientId: access.patient.id, delegated: access.delegated } }) });
+      return enqueuePortalNotification(tx, {
+        idempotencyKey: `appointment-cancelled:${String(req.params.id)}`,
         patientId: access.patient.id,
-        status: { in: [AppointmentStatus.SCHEDULED, AppointmentStatus.CONFIRMED] },
-        startsAt: { gt: new Date() },
-      },
-      data: { status: AppointmentStatus.CANCELLED },
+        category: "APPOINTMENT",
+        title: "Appointment updated",
+        message: "An appointment has been cancelled in your MediVerse portal.",
+      });
     });
-    if (changed.count !== 1) return portalError(res, 404, "APPOINTMENT_NOT_FOUND", "The appointment was not found or can no longer be cancelled.");
-    await prisma.auditLog.create({ data: auditData(req, req.auth!.userId, { action: "CANCEL", entity: "PORTAL_APPOINTMENT", entityId: String(req.params.id), metadata: { patientId: access.patient.id, delegated: access.delegated } }) });
-    const notifications = await createPortalNotification(access.patient.id, "APPOINTMENT", "Appointment updated", "An appointment has been cancelled in your MediVerse portal.");
+    if (!eventId) return portalError(res, 404, "APPOINTMENT_NOT_FOUND", "The appointment was not found or can no longer be cancelled.");
+    const notifications = await processOutboxTree(eventId);
     res.json({ data: { cancelled: true, notificationDelivery: notifications } });
   } catch (error) {
     next(error);
@@ -821,11 +775,18 @@ portalRouter.post("/portal/check-in/redeem", requireAuth, administratorOrRecepti
         select: { id: true, sequence: true, status: true, checkedInAt: true },
       });
       await tx.auditLog.create({ data: auditData(req, req.auth!.userId, { action: "CHECK_IN", entity: "QUEUE_ENTRY", entityId: created.id, metadata: { appointmentId: issued.appointmentId, patientId: issued.appointment.patientId } }) });
-      return created;
+      const eventId = await enqueuePortalNotification(tx, {
+        idempotencyKey: `check-in:${created.id}`,
+        patientId: issued.appointment.patientId,
+        category: "QUEUE",
+        title: "Check-in complete",
+        message: "Your check-in is complete. Sign in to view your queue status.",
+      });
+      return { entry: created, eventId };
     });
     if (!entry) return portalError(res, 409, "CHECK_IN_TOKEN_INVALID", "The check-in QR token has already been used.");
-    const notifications = await createPortalNotification(issued.appointment.patientId, "QUEUE", "Check-in complete", "Your check-in is complete. Sign in to view your queue status.");
-    res.status(201).json({ data: { entry, patient: issued.appointment.patient, department: issued.appointment.department, notificationDelivery: notifications } });
+    const notifications = await processOutboxTree(entry.eventId);
+    res.status(201).json({ data: { entry: entry.entry, patient: issued.appointment.patient, department: issued.appointment.department, notificationDelivery: notifications } });
   } catch (error) {
     next(error);
   }
@@ -879,15 +840,33 @@ portalRouter.patch("/portal/queue/desk/:id", requireAuth, administratorOrRecepti
           : [];
     if (!allowed.includes(input.status)) return portalError(res, 409, "INVALID_QUEUE_TRANSITION", "The requested queue status transition is not allowed.");
     const updated = await prisma.$transaction(async (tx) => {
-      const changed = await tx.queueEntry.updateMany({ where: { id: current.id, status: current.status }, data: { status: input.status } });
+      const changed = await tx.queueEntry.updateMany({
+        where: { id: current.id, status: current.status },
+        data: {
+          status: input.status,
+          calledAt: input.status === QueueEntryStatus.CALLED ? new Date() : undefined,
+          startedAt: input.status === QueueEntryStatus.IN_PROGRESS ? new Date() : undefined,
+          completedAt: input.status === QueueEntryStatus.COMPLETED ? new Date() : undefined,
+        },
+      });
       if (changed.count !== 1) return null;
-      const entry = await tx.queueEntry.findUniqueOrThrow({ where: { id: current.id }, select: { id: true, sequence: true, status: true, patientId: true } });
+      const entry = await tx.queueEntry.findUniqueOrThrow({
+        where: { id: current.id },
+        select: { id: true, sequence: true, status: true, patientId: true, checkedInAt: true, calledAt: true, startedAt: true, completedAt: true },
+      });
       await tx.auditLog.create({ data: auditData(req, req.auth!.userId, { action: "UPDATE_STATUS", entity: "QUEUE_ENTRY", entityId: entry.id, metadata: { status: entry.status } }) });
-      return entry;
+      const eventId = await enqueuePortalNotification(tx, {
+        idempotencyKey: `queue-status:${entry.id}:${entry.status}`,
+        patientId: entry.patientId,
+        category: "QUEUE",
+        title: "Queue status updated",
+        message: "Your queue status has changed. Sign in to view details.",
+      });
+      return { entry, eventId };
     });
     if (!updated) return portalError(res, 409, "QUEUE_ENTRY_CHANGED", "The queue entry changed before this update was applied.");
-    const notifications = await createPortalNotification(updated.patientId, "QUEUE", "Queue status updated", "Your queue status has changed. Sign in to view details.");
-    res.json({ data: { entry: updated, notificationDelivery: notifications } });
+    const notifications = await processOutboxTree(updated.eventId);
+    res.json({ data: { entry: updated.entry, notificationDelivery: notifications } });
   } catch (error) {
     next(error);
   }
@@ -939,20 +918,13 @@ portalRouter.post("/portal/notifications/:id/retry", requireAuth, portalRole, as
     for (const delivery of notification.deliveries) {
       const enabled = preference.emailEnabled && Boolean(user.emailVerifiedAt);
       if (!enabled) continue;
-      const claimed = await prisma.notificationDelivery.updateMany({
-        where: { id: delivery.id, status: NotificationDeliveryStatus.FAILED, attempts: { lt: 3 } },
-        data: { status: NotificationDeliveryStatus.PENDING, attempts: { increment: 1 }, lastError: null },
+      const retried = await retryNotificationDelivery(delivery.id);
+      if (!retried) continue;
+      const updated = await prisma.notificationDelivery.findUniqueOrThrow({
+        where: { id: delivery.id },
+        select: { channel: true, status: true },
       });
-      if (claimed.count !== 1) continue;
-      try {
-        await sendPortalEmail(delivery.destination, notification.title, `${notification.message}\nSign in to MediVerse to view details.`);
-        await prisma.notificationDelivery.update({ where: { id: delivery.id }, data: { status: NotificationDeliveryStatus.SENT, sentAt: new Date() } });
-        outcomes.push({ channel: delivery.channel, status: NotificationDeliveryStatus.SENT });
-      } catch (error) {
-        const lastError = error instanceof DeliveryUnavailableError ? error.message : "The configured delivery provider rejected the request.";
-        await prisma.notificationDelivery.update({ where: { id: delivery.id }, data: { status: NotificationDeliveryStatus.FAILED, lastError: lastError.slice(0, 200) } });
-        outcomes.push({ channel: delivery.channel, status: NotificationDeliveryStatus.FAILED });
-      }
+      outcomes.push(updated);
     }
     await prisma.auditLog.create({ data: auditData(req, req.auth!.userId, { action: "RETRY_DELIVERY", entity: "PORTAL_NOTIFICATION", entityId: notification.id, metadata: { retriedChannels: outcomes.map((item) => item.channel) } }) });
     res.json({ data: { deliveries: outcomes } });

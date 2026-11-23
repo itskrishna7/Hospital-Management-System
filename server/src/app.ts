@@ -1,7 +1,7 @@
 import express from "express";
 import helmet from "helmet";
 import cors from "cors";
-import { AppointmentStatus, AdmissionStatus, LabStatus, InvoiceStatus, Prisma, Role } from "@prisma/client";
+import { AppointmentStatus, AdmissionStatus, LabStatus, Prisma, Role } from "@prisma/client";
 import { z } from "zod";
 import crypto from "node:crypto";
 import bcrypt from "bcryptjs";
@@ -34,6 +34,11 @@ import {
 } from "./mfa.js";
 import { clinicalRouter } from "./clinical.js";
 import { portalRouter } from "./portal.js";
+import { operationsRouter } from "./operations.js";
+import { dischargeRouter } from "./discharges.js";
+import { reliableEventsRouter } from "./reliable-events.js";
+import { intelligenceRouter } from "./intelligence.js";
+import { interoperabilityRouter } from "./interoperability.js";
 
 const app = express();
 app.use(helmet());
@@ -46,6 +51,11 @@ app.get("/api/v1/health", async (_req, res) => {
 });
 const passwordSchema = z.string().min(12).max(128).refine((value) => Buffer.byteLength(value, "utf8") <= 72, "Password must not exceed 72 UTF-8 bytes.");
 const currentPasswordSchema = z.string().min(8).max(128).refine((value) => Buffer.byteLength(value, "utf8") <= 72, "Password is too long.");
+const pageQuerySchema = z.object({
+  page: z.coerce.number().int().min(1).max(1_000).default(1),
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+});
+const admissionListQuerySchema = pageQuerySchema.extend({ status: z.nativeEnum(AdmissionStatus).optional() });
 const dummyPasswordHash = bcrypt.hash(crypto.randomBytes(32).toString("hex"), 12);
 class InvalidMfaVerificationError extends Error {}
 
@@ -325,8 +335,7 @@ app.delete("/api/v1/auth/sessions/:id", requireAuth, async (req: AuthenticatedRe
 });
 app.get("/api/v1/admin/users", requireAuth, requireRole(...administratorRoles), async (req, res, next) => {
   try {
-    const page = Math.max(1, Number(req.query.page ?? 1));
-    const limit = Math.min(100, Math.max(1, Number(req.query.limit ?? 20)));
+    const { page, limit } = pageQuerySchema.parse(req.query);
     const [items, total] = await prisma.$transaction([
       prisma.user.findMany({
         skip: (page - 1) * limit,
@@ -410,18 +419,20 @@ app.get("/api/v1/dashboard/summary", requireAuth, requireRole(...patientReadRole
     ]);
     const data = { patients, appointments, occupiedBeds: occupied, availableBeds: beds - occupied, doctorsOnDuty: doctors, pendingLabs: labs };
     if (billingRoles.includes(req.auth!.role as (typeof billingRoles)[number])) {
-      const [invoices, revenue] = await Promise.all([
+      const [invoices, payments, refunds] = await Promise.all([
         prisma.invoice.count({ where: { status: { not: "PAID" } } }),
         prisma.payment.aggregate({ _sum: { amount: true } }),
+        prisma.refund.aggregate({ _sum: { amount: true } }),
       ]);
-      return res.json({ data: { ...data, pendingInvoices: invoices, revenue: Number(revenue._sum.amount ?? 0) } });
+      const revenue = Number(payments._sum.amount ?? 0) - Number(refunds._sum.amount ?? 0);
+      return res.json({ data: { ...data, pendingInvoices: invoices, revenue } });
     }
     res.json({ data });
   } catch (error) { next(error); }
 });
 app.get("/api/v1/patients", requireAuth, requireRole(...patientReadRoles), async (req: AuthenticatedRequest, res, next) => {
   try {
-    const page = Math.max(1, Number(req.query.page ?? 1)); const limit = Math.min(100, Math.max(1, Number(req.query.limit ?? 20)));
+    const { page, limit } = pageQuerySchema.parse(req.query);
     const search = String(req.query.search ?? "").trim();
     const where: Prisma.PatientWhereInput = search ? { OR: [{ firstName: { contains: search, mode: "insensitive" } }, { lastName: { contains: search, mode: "insensitive" } }, { patientNumber: { contains: search, mode: "insensitive" } }] } : {};
     if (req.auth!.role === Role.DOCTOR) {
@@ -492,14 +503,33 @@ app.patch("/api/v1/patients/:id", requireAuth, requireRole(Role.SUPER_ADMIN, Rol
 });
 app.get("/api/v1/appointments", requireAuth, requireRole(...appointmentRoles), async (req: AuthenticatedRequest, res, next) => {
   try {
-    const where = req.auth!.role === Role.DOCTOR ? { doctor: { userId: req.auth!.userId } } : undefined;
-    const items = await prisma.appointment.findMany({
+    const { page, limit } = pageQuerySchema.parse(req.query);
+    const where: Prisma.AppointmentWhereInput = req.auth!.role === Role.DOCTOR ? { doctor: { userId: req.auth!.userId } } : {};
+    const [items, total] = await prisma.$transaction([
+      prisma.appointment.findMany({
       where,
-      orderBy: { startsAt: "asc" },
-      include: { patient: true, doctor: { include: { user: true } }, department: true },
-    });
-    await writeAudit(req, { action: "READ", entity: "APPOINTMENT" });
-    res.json({ data: items });
+        skip: (page - 1) * limit,
+        take: limit,
+        orderBy: [{ startsAt: "asc" }, { id: "asc" }],
+        select: {
+          id: true,
+          patientId: true,
+          doctorId: true,
+          departmentId: true,
+          startsAt: true,
+          endsAt: true,
+          status: true,
+          createdAt: true,
+          updatedAt: true,
+          patient: { select: { id: true, patientNumber: true, firstName: true, lastName: true } },
+          doctor: { select: { id: true, specialty: true, user: { select: { id: true, name: true } } } },
+          department: { select: { id: true, name: true } },
+        },
+      }),
+      prisma.appointment.count({ where }),
+    ]);
+    await writeAudit(req, { action: "READ", entity: "APPOINTMENT", metadata: { page, limit, recordCount: items.length } });
+    res.json({ data: { items, page, limit, total } });
   } catch (error) { next(error); }
 });
 app.patch("/api/v1/appointments/:id/status", requireAuth, requireRole(Role.SUPER_ADMIN, Role.HOSPITAL_ADMIN, Role.ADMIN, Role.RECEPTIONIST, Role.DOCTOR), async (req: AuthenticatedRequest, res, next) => {
@@ -521,48 +551,78 @@ app.patch("/api/v1/appointments/:id/status", requireAuth, requireRole(Role.SUPER
 });
 app.get("/api/v1/admissions", requireAuth, requireRole(...admissionRoles), async (req: AuthenticatedRequest, res, next) => {
   try {
+    const { page, limit, status } = admissionListQuerySchema.parse(req.query);
     const doctor = req.auth!.role === Role.DOCTOR
       ? await prisma.doctor.findUnique({ where: { userId: req.auth!.userId }, select: { departmentId: true } })
       : null;
     if (req.auth!.role === Role.DOCTOR && !doctor) return res.status(403).json({ error: { code: "DOCTOR_PROFILE_REQUIRED", message: "A doctor profile is required for this resource." } });
-    const where = doctor ? { patient: { is: { departmentId: doctor.departmentId } } } : undefined;
-    const items = await prisma.admission.findMany({ where, orderBy: { admittedAt: "desc" }, include: { patient: true, bed: { include: { ward: { include: { department: true } } } } } });
-    await writeAudit(req, { action: "READ", entity: "ADMISSION" });
-    res.json({ data: items });
+    const where: Prisma.AdmissionWhereInput = {
+      ...(doctor ? { patient: { is: { departmentId: doctor.departmentId } } } : {}),
+      ...(status ? { status } : {}),
+    };
+    const [items, total] = await prisma.$transaction([
+      prisma.admission.findMany({
+        where,
+        skip: (page - 1) * limit,
+        take: limit,
+        orderBy: [{ admittedAt: "desc" }, { id: "asc" }],
+        select: {
+          id: true,
+          patientId: true,
+          bedId: true,
+          admittedAt: true,
+          dischargedAt: true,
+          status: true,
+          patient: { select: { id: true, patientNumber: true, firstName: true, lastName: true } },
+          bed: { select: { id: true, label: true, status: true, ward: { select: { id: true, name: true, department: { select: { id: true, name: true } } } } } },
+        },
+      }),
+      prisma.admission.count({ where }),
+    ]);
+    await writeAudit(req, { action: "READ", entity: "ADMISSION", metadata: { page, limit, recordCount: items.length } });
+    res.json({ data: { items, page, limit, total } });
   } catch (error) { next(error); }
 });
 app.patch("/api/v1/admissions/:id/status", requireAuth, requireRole(Role.SUPER_ADMIN, Role.HOSPITAL_ADMIN, Role.ADMIN, Role.DOCTOR, Role.NURSE), async (req: AuthenticatedRequest, res, next) => {
   try {
-    const input = z.object({ status: z.nativeEnum(AdmissionStatus) }).parse(req.body);
-    const doctor = req.auth!.role === Role.DOCTOR
-      ? await prisma.doctor.findUnique({ where: { userId: req.auth!.userId }, select: { departmentId: true } })
-      : null;
-    if (req.auth!.role === Role.DOCTOR && !doctor) return res.status(403).json({ error: { code: "DOCTOR_PROFILE_REQUIRED", message: "A doctor profile is required for this resource." } });
-    const admission = await prisma.$transaction(async (tx) => {
-      const where: Prisma.AdmissionWhereInput = doctor
-        ? { id: String(req.params.id), patient: { departmentId: doctor.departmentId } }
-        : { id: String(req.params.id) };
-      const changed = await tx.admission.updateMany({ where, data: { status: input.status, dischargedAt: input.status === AdmissionStatus.DISCHARGED ? new Date() : null } });
-      if (changed.count !== 1) return null;
-      const updated = await tx.admission.findUniqueOrThrow({ where: { id: String(req.params.id) } });
-      await tx.bed.update({ where: { id: updated.bedId }, data: { status: input.status === AdmissionStatus.DISCHARGED ? "AVAILABLE" : "OCCUPIED" } });
-      await tx.auditLog.create({ data: auditLogData(req, { action: "UPDATE_STATUS", entity: "ADMISSION", entityId: updated.id, metadata: { status: input.status } }) });
-      return updated;
+    z.object({ status: z.nativeEnum(AdmissionStatus) }).parse(req.body);
+    res.status(409).json({
+      error: {
+        code: "DISCHARGE_WORKFLOW_REQUIRED",
+        message: "Admission status is finalized only through clinician approval and completion of the discharge checklist.",
+      },
     });
-    if (!admission) return res.status(404).json({ error: { code: "ADMISSION_NOT_FOUND", message: "The requested admission was not found." } });
-    res.json({ data: admission });
   } catch (error) { next(error); }
 });
 app.get("/api/v1/lab-orders", requireAuth, requireRole(...labRoles), async (req: AuthenticatedRequest, res, next) => {
   try {
+    const { page, limit } = pageQuerySchema.parse(req.query);
     const doctor = req.auth!.role === Role.DOCTOR
       ? await prisma.doctor.findUnique({ where: { userId: req.auth!.userId }, select: { departmentId: true } })
       : null;
     if (req.auth!.role === Role.DOCTOR && !doctor) return res.status(403).json({ error: { code: "DOCTOR_PROFILE_REQUIRED", message: "A doctor profile is required for this resource." } });
-    const where = doctor ? { patient: { is: { departmentId: doctor.departmentId } } } : undefined;
-    const items = await prisma.labOrder.findMany({ where, orderBy: { createdAt: "desc" }, include: { patient: true, result: true } });
-    await writeAudit(req, { action: "READ", entity: "LAB_ORDER" });
-    res.json({ data: items });
+    const where: Prisma.LabOrderWhereInput = doctor ? { patient: { is: { departmentId: doctor.departmentId } } } : {};
+    const [items, total] = await prisma.$transaction([
+      prisma.labOrder.findMany({
+        where,
+        skip: (page - 1) * limit,
+        take: limit,
+        orderBy: [{ createdAt: "desc" }, { id: "asc" }],
+        select: {
+          id: true,
+          patientId: true,
+          testName: true,
+          status: true,
+          createdAt: true,
+          updatedAt: true,
+          patient: { select: { id: true, patientNumber: true, firstName: true, lastName: true } },
+          result: { select: { id: true, summary: true, createdAt: true } },
+        },
+      }),
+      prisma.labOrder.count({ where }),
+    ]);
+    await writeAudit(req, { action: "READ", entity: "LAB_ORDER", metadata: { page, limit, recordCount: items.length } });
+    res.json({ data: { items, page, limit, total } });
   } catch (error) { next(error); }
 });
 app.patch("/api/v1/lab-orders/:id/status", requireAuth, requireRole(Role.SUPER_ADMIN, Role.HOSPITAL_ADMIN, Role.ADMIN, Role.LAB_TECHNICIAN, Role.RADIOLOGIST, Role.DOCTOR), async (req: AuthenticatedRequest, res, next) => {
@@ -588,24 +648,40 @@ app.patch("/api/v1/lab-orders/:id/status", requireAuth, requireRole(Role.SUPER_A
 });
 app.get("/api/v1/invoices", requireAuth, requireRole(...billingRoles), async (req, res, next) => {
   try {
-    const items = await prisma.invoice.findMany({ orderBy: { createdAt: "desc" }, include: { patient: true } });
-    await writeAudit(req, { action: "READ", entity: "INVOICE" });
-    res.json({ data: items });
+    const { page, limit } = pageQuerySchema.parse(req.query);
+    const where: Prisma.InvoiceWhereInput = {};
+    const [items, total] = await prisma.$transaction([
+      prisma.invoice.findMany({
+        where,
+        skip: (page - 1) * limit,
+        take: limit,
+        orderBy: [{ createdAt: "desc" }, { id: "asc" }],
+        select: {
+          id: true,
+          patientId: true,
+          total: true,
+          balance: true,
+          status: true,
+          createdAt: true,
+          patient: { select: { id: true, patientNumber: true, firstName: true, lastName: true } },
+        },
+      }),
+      prisma.invoice.count({ where }),
+    ]);
+    await writeAudit(req, { action: "READ", entity: "INVOICE", metadata: { page, limit, recordCount: items.length } });
+    res.json({ data: { items, page, limit, total } });
   } catch (error) { next(error); }
 });
-app.patch("/api/v1/invoices/:id/status", requireAuth, requireRole(Role.SUPER_ADMIN, Role.HOSPITAL_ADMIN, Role.ADMIN, Role.ACCOUNTANT, Role.BILLING_STAFF), async (req: AuthenticatedRequest, res, next) => {
-  try {
-    const input = z.object({ status: z.nativeEnum(InvoiceStatus) }).parse(req.body);
-    const invoice = await prisma.$transaction(async (tx) => {
-      const updated = await tx.invoice.update({ where: { id: String(req.params.id) }, data: { status: input.status, balance: input.status === InvoiceStatus.PAID ? 0 : undefined } });
-      await tx.auditLog.create({ data: auditLogData(req, { action: "UPDATE_STATUS", entity: "INVOICE", entityId: updated.id, metadata: { status: input.status } }) });
-      return updated;
-    });
-    res.json({ data: invoice });
-  } catch (error) { next(error); }
+app.patch("/api/v1/invoices/:id/status", requireAuth, requireRole(Role.SUPER_ADMIN, Role.HOSPITAL_ADMIN, Role.ADMIN, Role.ACCOUNTANT, Role.BILLING_STAFF), (_req: AuthenticatedRequest, res) => {
+  res.status(409).json({ error: { code: "PAYMENT_WORKFLOW_REQUIRED", message: "Invoice status is derived from recorded payments and refunds." } });
 });
 app.use("/api/v1", clinicalRouter);
 app.use("/api/v1", portalRouter);
+app.use("/api/v1", operationsRouter);
+app.use("/api/v1", dischargeRouter);
+app.use("/api/v1", reliableEventsRouter);
+app.use("/api/v1", intelligenceRouter);
+app.use("/api/v1", interoperabilityRouter);
 app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
   if (error instanceof z.ZodError) return res.status(400).json({ error: { code: "VALIDATION_ERROR", message: error.issues[0]?.message ?? "Invalid request" } });
   if (error instanceof SyntaxError) return res.status(400).json({ error: { code: "INVALID_JSON", message: "The request body is not valid JSON." } });

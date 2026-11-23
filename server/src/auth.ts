@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { isIP } from "node:net";
 import type { NextFunction, Request, Response } from "express";
 import type { Role } from "@prisma/client";
 import { prisma } from "./db.js";
@@ -15,6 +16,10 @@ export type AuthenticatedRequest = Request & {
 };
 
 export function getClientIp(req: Request) {
+  if (process.env.VERCEL === "1") {
+    const vercelClientIp = req.header("x-vercel-forwarded-for")?.trim();
+    if (vercelClientIp && isIP(vercelClientIp)) return vercelClientIp;
+  }
   return req.socket.remoteAddress ?? null;
 }
 
@@ -26,7 +31,8 @@ export function getSessionToken(req: Request) {
   const cookie = req.headers.cookie;
   if (!cookie) return undefined;
   const match = cookie.split(";").map((part) => part.trim()).find((part) => part.startsWith(`${SESSION_COOKIE}=`));
-  return match ? decodeURIComponent(match.slice(SESSION_COOKIE.length + 1)) : undefined;
+  const token = match?.slice(SESSION_COOKIE.length + 1);
+  return token && /^[A-Za-z0-9_-]{43}$/.test(token) ? token : undefined;
 }
 
 export function setSessionCookie(res: Response, token: string, expiresAt: Date) {
@@ -84,7 +90,13 @@ export async function requireAuth(req: AuthenticatedRequest, res: Response, next
     if (!token) return res.status(401).json({ error: { code: "UNAUTHORIZED", message: "Authentication is required." } });
     const session = await prisma.session.findUnique({
       where: { tokenHash: hashToken(token) },
-      include: { user: true },
+      select: {
+        userId: true,
+        expiresAt: true,
+        revokedAt: true,
+        mfaVerified: true,
+        user: { select: { active: true, role: true } },
+      },
     });
     if (!session || session.revokedAt || session.expiresAt <= new Date() || !session.user.active) {
       return res.status(401).json({ error: { code: "SESSION_INVALID", message: "The session is invalid or expired." } });
@@ -101,7 +113,16 @@ export async function requireMfaChallenge(req: AuthenticatedRequest, res: Respon
   try {
     const token = getSessionToken(req);
     if (!token) return res.status(401).json({ error: { code: "MFA_CHALLENGE_REQUIRED", message: "Complete multi-factor verification." } });
-    const session = await prisma.session.findUnique({ where: { tokenHash: hashToken(token) }, include: { user: true } });
+    const session = await prisma.session.findUnique({
+      where: { tokenHash: hashToken(token) },
+      select: {
+        userId: true,
+        expiresAt: true,
+        revokedAt: true,
+        mfaVerified: true,
+        user: { select: { active: true, mfaEnabled: true, role: true } },
+      },
+    });
     if (!session || session.revokedAt || session.expiresAt <= new Date() || !session.user.active || !session.user.mfaEnabled || session.mfaVerified) {
       return res.status(401).json({ error: { code: "MFA_CHALLENGE_INVALID", message: "The multi-factor challenge is invalid or expired." } });
     }

@@ -1,1 +1,1 @@
-{"root":["./src/clinical.tsx","./src/main.tsx","./src/portal.tsx","./src/vite-env.d.ts"],"version":"5.9.3"}
+{"root":["./src/clinical.tsx","./src/discharges.tsx","./src/intelligence.tsx","./src/main.tsx","./src/operations.tsx","./src/portal.tsx","./src/staff-notifications.tsx","./src/vite-env.d.ts"],"version":"5.9.3"}

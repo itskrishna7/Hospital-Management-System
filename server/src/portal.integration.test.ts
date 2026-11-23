@@ -316,5 +316,11 @@ describe("Phase 3 patient-portal PostgreSQL integration", () => {
     expect(await prisma.notificationDelivery.count({ where: { status: "SENT", notification: { userId: patientUserId } } })).toBeGreaterThanOrEqual(3);
     expect(await prisma.notificationDelivery.count({ where: { channel: "SMS", notification: { userId: patientUserId } } })).toBe(0);
     expect(deliveries.email.every((delivery) => !delivery.text.includes(`TST-${tag}`) && !delivery.text.includes("Portal Patient"))).toBe(true);
+
+    const started = await request(`/portal/queue/desk/${desk.payload.data[0].id}`, "PATCH", { status: "IN_PROGRESS" }, staffCookie);
+    expect(started.payload.data.entry.startedAt).toBeTruthy();
+    const completed = await request(`/portal/queue/desk/${desk.payload.data[0].id}`, "PATCH", { status: "COMPLETED" }, staffCookie);
+    expect(completed.payload.data.entry.completedAt).toBeTruthy();
+    expect(new Date(completed.payload.data.entry.calledAt).getTime()).toBeGreaterThanOrEqual(new Date(completed.payload.data.entry.checkedInAt).getTime());
   });
 });

@@ -467,7 +467,7 @@ function NursingPage({ api, user }: { api: ClinicalApi; user: ClinicalUser }) {
   const patientsQuery = usePatients(api, true);
   const admissionsQuery = useQuery<Admission[]>({
     queryKey: ["nursing-admissions"],
-    queryFn: () => api.get("/admissions").then((response) => response.data.data as Admission[]),
+    queryFn: () => api.get("/admissions", { params: { status: "ACTIVE", limit: 100 } }).then((response) => response.data.data.items as Admission[]),
   });
   const [patientId, setPatientId] = React.useState("");
   const [taskTitle, setTaskTitle] = React.useState("");
@@ -593,7 +593,7 @@ function EmergencyPage({ api, user }: { api: ClinicalApi; user: ClinicalUser }) 
   });
   const admissionsQuery = useQuery<Admission[]>({
     queryKey: ["emergency-admissions"],
-    queryFn: () => api.get("/admissions").then((response) => response.data.data as Admission[]),
+    queryFn: () => api.get("/admissions", { params: { status: "ACTIVE", limit: 100 } }).then((response) => response.data.data.items as Admission[]),
     enabled: isClinician,
   });
   const refreshCategories = () => queryClient.invalidateQueries({ queryKey: ["triage-categories"] });

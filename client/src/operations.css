@@ -1,0 +1,54 @@
+.phase4-tabs{display:flex;flex-wrap:wrap;gap:8px;margin:20px 0}
+.phase4-tabs button{border:1px solid #31516b;border-radius:8px;background:#0e1e30;color:#b9cddd;padding:9px 13px;cursor:pointer}
+.phase4-tabs button.active,.phase4-tabs button:hover{border-color:#39d9ff;color:#39d9ff;background:#123149}
+.phase4-panel{display:grid;gap:16px;margin:16px 0}
+.phase4-panel h2{margin:0;font-size:17px}
+.phase4-panel p{margin:8px 0;color:#7790aa;font-size:12px}
+.phase4-form{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;align-items:end}
+.phase4-form label{display:grid;gap:6px;color:#9fb6c9;font-size:12px}
+.phase4-form input,.phase4-form select,.phase4-form textarea,.phase4-card select,.phase4-inline-form select{min-width:0;width:100%;padding:9px;border:1px solid #1d344c;border-radius:7px;background:#07111f;color:#eaf4fb;font:inherit}
+.phase4-form textarea{resize:vertical}
+.phase4-form button,.phase4-card button,.phase4-inline-form button{min-height:36px}
+.phase4-panel .secondary{border:1px solid #31516b;border-radius:8px;background:transparent;color:#b9cddd;padding:9px 12px;cursor:pointer}
+.phase4-panel .secondary:hover{border-color:#39d9ff;color:#39d9ff}
+.phase4-list{display:grid;gap:10px}
+.phase4-card{display:grid;gap:11px;padding:14px;border:1px solid #1d344c;border-radius:10px;background:#0a1929;color:#b9cddd;font-size:12px}
+.phase4-card p{margin:0;color:#b9cddd}
+.phase4-card ul{margin:0;padding-left:20px;color:#9fb6c9}
+.phase4-card-head,.phase4-inline{display:flex;justify-content:space-between;align-items:center;gap:12px}
+.phase4-card-head strong,.phase4-inline strong{overflow-wrap:anywhere}
+.phase4-inline{padding:10px 0;border-bottom:1px solid #1d344c}
+.phase4-inline span,.phase4-inline small{display:block}
+.phase4-inline small{margin-top:5px;color:#7790aa}
+.phase4-subform{padding-top:12px;border-top:1px solid #1d344c}
+.phase4-subform>span{align-self:center;color:#9fb6c9}
+.phase4-inline-form{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.phase4-inline-form select{width:auto;min-width:130px}
+.phase4-report{max-height:250px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;padding:12px;border-radius:8px;background:#07111f;color:#b9dbe8}
+.phase4-panel .error{color:#ff7f8e}
+.phase5-discharge-panel,.phase5-alert-list{display:grid;gap:16px;margin:16px 0}
+.record-pagination{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:12px 0;color:#9fb6c9;font-size:12px}
+.record-pagination button{border:1px solid #31516b;border-radius:8px;background:transparent;color:#b9cddd;padding:8px 11px;cursor:pointer}
+.record-pagination button:disabled{opacity:.45;cursor:not-allowed}
+.phase5-admission-select{display:grid;gap:6px;color:#9fb6c9;font-size:12px}
+.phase5-admission-select select{max-width:640px;padding:10px;border:1px solid #1d344c;border-radius:7px;background:#07111f;color:#eaf4fb;font:inherit}
+.phase5-checklist{display:grid;gap:8px}
+.phase5-checklist-item,.phase5-alert{display:flex;justify-content:space-between;align-items:center;gap:14px;padding:13px;border:1px solid #1d344c;border-radius:9px;background:#0a1929;color:#b9cddd}
+.phase5-checklist-item span,.phase5-checklist-item small,.phase5-alert small{display:block}
+.phase5-checklist-item small,.phase5-alert small{margin-top:5px;color:#7790aa}
+.phase5-discharge-panel .secondary,.phase5-alert .secondary{border:1px solid #31516b;border-radius:8px;background:transparent;color:#b9cddd;padding:8px 11px;cursor:pointer}
+.phase5-discharge-panel .primary{justify-self:start}
+.phase5-success{color:#71e1ad}
+.phase5-alert-list{align-content:start}
+.phase5-alert p{margin:8px 0 0;color:#9fb6c9}
+.phase5-alert.unread{border-color:#2a8297;background:#0b2232}
+.ops-live-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
+.ops-live-card{padding:14px;border:1px solid #1d344c;border-radius:9px;background:#0a1929}
+.ops-live-card small,.ops-live-card strong{display:block}
+.ops-live-card small{color:#7790aa}
+.ops-live-card strong{margin-top:7px;color:#eaf4fb;font-size:22px}
+.ops-live-meta{color:#7790aa;font-size:11px}
+.phase5-panel .error{color:#ff7f8e}
+@media(max-width:780px){.phase4-card-head,.phase4-inline{align-items:flex-start;flex-direction:column}.phase4-inline-form,.phase4-inline-form select{width:100%}.phase4-form{grid-template-columns:1fr}}
+@media(max-width:780px){.phase5-checklist-item,.phase5-alert{align-items:flex-start;flex-direction:column}.phase5-discharge-panel .primary{width:100%}}
+@media(max-width:520px){.record-pagination{align-items:stretch;flex-direction:column}.record-pagination button{width:100%}}

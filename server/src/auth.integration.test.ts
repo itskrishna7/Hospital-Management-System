@@ -7,13 +7,14 @@ import { Role } from "@prisma/client";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import app from "./app.js";
 import { prisma } from "./db.js";
-import { hashToken } from "./auth.js";
+import { getClientIp, getSessionToken, hashToken } from "./auth.js";
 import { createTotpCode, hashRecoveryCode } from "./mfa.js";
 
 const runId = `phase1-${crypto.randomUUID()}`;
 const doctorEmail = `${runId}-doctor@example.test`;
 const otherDoctorEmail = `${runId}-other-doctor@example.test`;
 const adminEmail = `${runId}-admin@example.test`;
+const receptionistEmail = `${runId}-receptionist@example.test`;
 const missingEmail = `${runId}-missing@example.test`;
 const rateLimitedEmail = `${runId}-rate@example.test`;
 const departmentName = `Phase 1 ${runId}`;
@@ -21,8 +22,9 @@ const otherDepartmentName = `Phase 1 Other ${runId}`;
 const scopedPatientNumbers = [`TST-${runId}-A`, `TST-${runId}-B`];
 const doctorPassword = "Doctor-Test-Password-2026!";
 const adminPassword = "Admin-Test-Password-2026!";
+const receptionistPassword = "Receptionist-Test-Password-2026!";
 const newPassword = "Doctor-Changed-Password-2026!";
-const testEmails = [doctorEmail, otherDoctorEmail, adminEmail, missingEmail, rateLimitedEmail];
+const testEmails = [doctorEmail, otherDoctorEmail, adminEmail, receptionistEmail, missingEmail, rateLimitedEmail];
 let doctorId = "";
 let otherDoctorId = "";
 let adminId = "";
@@ -101,7 +103,7 @@ describe("Phase 1 PostgreSQL authentication integration", () => {
       prisma.department.create({ data: { name: otherDepartmentName } }),
     ]);
     departmentIds = [department.id, otherDepartment.id];
-    const [doctor, otherDoctor, admin] = await Promise.all([
+    const [doctor, otherDoctor, admin, receptionist] = await Promise.all([
       prisma.user.create({
         data: { email: doctorEmail, name: "Phase 1 Integration Doctor", role: Role.DOCTOR, passwordHash: await bcrypt.hash(doctorPassword, 12) },
       }),
@@ -110,6 +112,9 @@ describe("Phase 1 PostgreSQL authentication integration", () => {
       }),
       prisma.user.create({
         data: { email: adminEmail, name: "Phase 1 Integration Admin", role: Role.ADMIN, passwordHash: await bcrypt.hash(adminPassword, 12) },
+      }),
+      prisma.user.create({
+        data: { email: receptionistEmail, name: "Phase 1 Integration Receptionist", role: Role.RECEPTIONIST, passwordHash: await bcrypt.hash(receptionistPassword, 12) },
       }),
     ]);
     doctorId = doctor.id;
@@ -229,20 +234,71 @@ describe("Phase 1 PostgreSQL authentication integration", () => {
     expect(scopedNumbers).toContain(scopedPatientNumbers[0]);
     expect(scopedNumbers).not.toContain(scopedPatientNumbers[1]);
     const otherPatient = await prisma.patient.findUniqueOrThrow({ where: { patientNumber: scopedPatientNumbers[1] } });
+    const ownPatient = await prisma.patient.findUniqueOrThrow({ where: { patientNumber: scopedPatientNumbers[0] } });
     const hiddenPatientUpdate = await request(`/patients/${otherPatient.id}`, "PATCH", { phone: "+19999999999" }, doctorCookie);
     expect(hiddenPatientUpdate.response.status).toBe(404);
     const appointments = await request("/appointments", "GET", undefined, doctorCookie);
     expect(appointments.response.status).toBe(200);
-    expect(appointments.payload.data.map((appointment: { id: string }) => appointment.id)).toContain(appointmentIds[0]);
-    expect(appointments.payload.data.map((appointment: { id: string }) => appointment.id)).not.toContain(appointmentIds[1]);
+    expect(appointments.payload.data.page).toBe(1);
+    expect(appointments.payload.data.limit).toBe(20);
+    expect(appointments.payload.data.total).toBe(1);
+    expect(appointments.payload.data.items.map((appointment: { id: string }) => appointment.id)).toContain(appointmentIds[0]);
+    expect(appointments.payload.data.items.map((appointment: { id: string }) => appointment.id)).not.toContain(appointmentIds[1]);
+    const doctorUser = appointments.payload.data.items[0]?.doctor.user;
+    expect(doctorUser).toMatchObject({ id: doctorId, name: "Phase 1 Integration Doctor" });
+    expect(doctorUser).not.toHaveProperty("passwordHash");
+    expect(doctorUser).not.toHaveProperty("mfaSecret");
+    expect((await request("/appointments?limit=101", "GET", undefined, doctorCookie)).response.status).toBe(400);
+    const exportPath = `/interop/fhir/r4/patients/${ownPatient.id}/$export`;
+    const fhirExport = await request(exportPath, "GET", undefined, doctorCookie);
+    expect(fhirExport.response.status).toBe(200);
+    expect(fhirExport.response.headers.get("content-type")).toContain("application/fhir+json");
+    expect(fhirExport.payload).toMatchObject({ resourceType: "Bundle", type: "collection" });
+    expect(fhirExport.payload.entry.map((entry: { resource: { resourceType: string } }) => entry.resource.resourceType)).toEqual(expect.arrayContaining(["Patient", "Appointment", "Practitioner", "Organization"]));
+    const scopedExport = await request(`/interop/fhir/r4/patients/${otherPatient.id}/$export`, "GET", undefined, doctorCookie);
+    expect(scopedExport.response.status).toBe(404);
     const hiddenAppointmentUpdate = await request(`/appointments/${appointmentIds[1]}/status`, "PATCH", { status: "CANCELLED" }, doctorCookie);
     expect(hiddenAppointmentUpdate.response.status).toBe(404);
     expect(await prisma.auditLog.count({ where: { userId: doctorId, action: "READ", entity: "PATIENT" } })).toBe(1);
+    expect(await prisma.auditLog.count({ where: { userId: doctorId, action: "EXPORT", entity: "FHIR_BUNDLE", entityId: ownPatient.id } })).toBe(1);
 
     const logout = await request("/auth/logout", "POST", {}, doctorCookie);
     expect(logout.response.status).toBe(204);
     expect((await prisma.session.findUnique({ where: { id: session!.id } }))?.revokedAt).not.toBeNull();
     expect((await request("/auth/me", "GET", undefined, doctorCookie)).response.status).toBe(401);
+  });
+
+  it("restricts FHIR exports to explicitly authorized clinical and administrative roles", async () => {
+    const signedIn = await login(receptionistEmail, receptionistPassword);
+    const receptionistCookie = responseCookie(signedIn.response);
+    const patient = await prisma.patient.findUniqueOrThrow({ where: { patientNumber: scopedPatientNumbers[0] } });
+
+    const denied = await request(`/interop/fhir/r4/patients/${patient.id}/$export`, "GET", undefined, receptionistCookie);
+    expect(denied.response.status).toBe(403);
+  });
+
+  it("uses only valid Vercel client-IP metadata and rejects malformed session cookies", () => {
+    const originalVercel = process.env.VERCEL;
+    const makeRequest = (forwardedIp?: string) => ({
+      headers: { cookie: `${"mediverse_session"}=${"a".repeat(43)}` },
+      header: (name: string) => name === "x-vercel-forwarded-for" ? forwardedIp : undefined,
+      socket: { remoteAddress: "192.0.2.10" },
+    }) as unknown as Parameters<typeof getClientIp>[0];
+
+    try {
+      process.env.VERCEL = "1";
+      expect(getClientIp(makeRequest("203.0.113.8"))).toBe("203.0.113.8");
+      expect(getClientIp(makeRequest("not-an-ip"))).toBe("192.0.2.10");
+      process.env.VERCEL = "0";
+      expect(getClientIp(makeRequest("203.0.113.8"))).toBe("192.0.2.10");
+      expect(getSessionToken(makeRequest()) ).toBe("a".repeat(43));
+      const malformedCookie = makeRequest();
+      malformedCookie.headers.cookie = "mediverse_session=%E0%A4%A";
+      expect(getSessionToken(malformedCookie)).toBeUndefined();
+    } finally {
+      if (originalVercel === undefined) delete process.env.VERCEL;
+      else process.env.VERCEL = originalVercel;
+    }
   });
 
   it("rejects expired sessions", async () => {
