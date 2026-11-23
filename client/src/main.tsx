@@ -2,7 +2,7 @@ import React from "react";
 import { createRoot } from "react-dom/client";
 import { QueryClient, QueryClientProvider, useMutation, useQuery } from "@tanstack/react-query";
 import axios from "axios";
-import { Activity, BedDouble, Bell, CalendarDays, Check, ChevronRight, ClipboardList, Edit3, Eye, EyeOff, FileText, FlaskConical, LayoutDashboard, LogOut, Menu, MessageCircle, Moon, PanelLeftClose, PanelLeftOpen, Pill, Save, ShieldCheck, Siren, Stethoscope, Sun, Users, WalletCards, type LucideIcon } from "lucide-react";
+import { Activity, BedDouble, Bell, CalendarDays, Check, ChevronRight, ClipboardList, Edit3, Eye, EyeOff, FileText, FlaskConical, LayoutDashboard, LogOut, Menu, MessageCircle, Moon, PanelLeftClose, PanelLeftOpen, Pill, Save, Search, ShieldCheck, Siren, Stethoscope, Sun, Users, WalletCards, X, type LucideIcon } from "lucide-react";
 import ClinicalWorkspace from "./clinical.js";
 import PortalWorkspace, { PatientFamilyInvitation, PatientPortalRegistration } from "./portal.js";
 import OperationsWorkspace from "./operations.js";
@@ -11,6 +11,7 @@ import StaffNotifications from "./staff-notifications.js";
 const IntelligenceWorkspace = React.lazy(() => import("./intelligence.js"));
 import "./styles.css";
 import "./design-system.css";
+import "./premium-redesign.css";
 
 const api = axios.create({ baseURL: import.meta.env.VITE_API_BASE_URL || (import.meta.env.PROD ? "/api/v1" : "http://localhost:4000/api/v1"), withCredentials: true });
 const demoEnabled = import.meta.env.DEV && import.meta.env.VITE_APP_MODE !== "production";
@@ -143,6 +144,8 @@ function App({ initialUser, onLogout, theme, onToggleTheme }: { initialUser: Aut
   const [page,setPage]=React.useState(initialPage);
   const [sidebarOpen, setSidebarOpen] = React.useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = React.useState(false);
+  const [commandOpen, setCommandOpen] = React.useState(false);
+  const [commandQuery, setCommandQuery] = React.useState("");
   const [user,setUser]=React.useState<AuthUser|null>(initialUser);
   const [logoutError,setLogoutError]=React.useState("");
   const selectPage = (nextPage: string) => {
@@ -154,6 +157,17 @@ function App({ initialUser, onLogout, theme, onToggleTheme }: { initialUser: Aut
   React.useEffect(() => {
     if (!pageRoles[page]?.includes(user?.role ?? "")) setPage("Dashboard");
   }, [page, user?.role]);
+  React.useEffect(() => {
+    const handleShortcut = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        setCommandOpen((open) => !open);
+      }
+      if (event.key === "Escape") setCommandOpen(false);
+    };
+    window.addEventListener("keydown", handleShortcut);
+    return () => window.removeEventListener("keydown", handleShortcut);
+  }, []);
   const logout = async () => {
     setLogoutError("");
     try {
@@ -199,10 +213,37 @@ function App({ initialUser, onLogout, theme, onToggleTheme }: { initialUser: Aut
           <div className="header-breadcrumb"><span>Workspace</span><ChevronRight size={15} aria-hidden="true"/><strong>{page}</strong></div>
         </div>
         <div className="header-trailing">
+          <button type="button" className="global-search-trigger" aria-label="Open global search" onClick={() => { setCommandOpen(true); setCommandQuery(""); }}>
+            <Search size={16}/>
+            <span>Search MediVerse</span>
+            <kbd>Ctrl K</kbd>
+          </button>
           <ThemeToggle theme={theme} onToggle={onToggleTheme}/>
           <div className="profile-summary"><span className="profile-avatar" aria-hidden="true">{user?.name.slice(0, 1).toUpperCase() ?? "M"}</span><span><strong>{user?.name ?? "MediVerse"}</strong><small>{user?.role.replaceAll("_", " ") ?? "Workspace"}</small></span></div>
         </div>
       </header>
+      {commandOpen && <div className="command-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setCommandOpen(false); }}>
+        <section className="command-palette" role="dialog" aria-modal="true" aria-label="Navigate MediVerse">
+          <div className="command-input-wrap">
+            <Search size={18}/>
+            <input autoFocus value={commandQuery} onChange={(event) => setCommandQuery(event.target.value)} placeholder="Search pages and workflows…" aria-label="Search pages and workflows"/>
+            <button type="button" aria-label="Close command palette" onClick={() => setCommandOpen(false)}><X size={16}/></button>
+          </div>
+          <div className="command-results">
+            {visibleNav
+              .filter((item) => item.label.toLocaleLowerCase().includes(commandQuery.trim().toLocaleLowerCase()))
+              .map((item) => {
+                const Icon = item.icon;
+                return <button type="button" key={item.label} onClick={() => { selectPage(item.label); setCommandOpen(false); setCommandQuery(""); }}>
+                  <span className="command-icon"><Icon size={17}/></span>
+                  <span><strong>{item.label}</strong><small>{navGroups.find((group) => group.items.includes(item.label))?.label ?? "Workspace"}</small></span>
+                  <ChevronRight size={16}/>
+                </button>;
+              })}
+            {visibleNav.every((item) => !item.label.toLocaleLowerCase().includes(commandQuery.trim().toLocaleLowerCase())) && <p className="command-empty">No matching workspace pages</p>}
+          </div>
+        </section>
+      </div>}
       <section className="content">{page === "Security" && user ? <SecurityPage user={user} onMfaChanged={(enabled) => setUser({ ...user, mfaEnabled: enabled })}/> : <Dashboard page={page} user={user} onNavigate={selectPage}/>}</section>
     </main>
   </div>;
