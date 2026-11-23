@@ -19,7 +19,7 @@ async function main() {
   }
 
   const user = await prisma.$transaction(async (tx) => {
-    await tx.$queryRaw`SELECT pg_advisory_xact_lock(702607112, 1)`;
+    await tx.$queryRaw`SELECT pg_advisory_xact_lock(702607112, 1)::text AS acquired`;
     if (await tx.user.count() !== 0) {
       throw new Error("Bootstrap is allowed only when the User table is empty.");
     }

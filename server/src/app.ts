@@ -40,7 +40,10 @@ app.use(helmet());
 app.use(cors({ origin: env.CLIENT_ORIGIN, credentials: true }));
 app.use(express.json({ limit: "1mb" }));
 app.use(requireSafeOrigin);
-app.get("/api/v1/health", (_req, res) => res.json({ data: { status: "ok", syntheticData: env.NODE_ENV !== "production" } }));
+app.get("/api/v1/health", async (_req, res) => {
+  await prisma.$queryRaw`SELECT 1`;
+  res.json({ data: { status: "ok", database: "connected", syntheticData: env.NODE_ENV !== "production" } });
+});
 const passwordSchema = z.string().min(12).max(128).refine((value) => Buffer.byteLength(value, "utf8") <= 72, "Password must not exceed 72 UTF-8 bytes.");
 const currentPasswordSchema = z.string().min(8).max(128).refine((value) => Buffer.byteLength(value, "utf8") <= 72, "Password is too long.");
 const dummyPasswordHash = bcrypt.hash(crypto.randomBytes(32).toString("hex"), 12);
@@ -606,6 +609,13 @@ app.use("/api/v1", portalRouter);
 app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
   if (error instanceof z.ZodError) return res.status(400).json({ error: { code: "VALIDATION_ERROR", message: error.issues[0]?.message ?? "Invalid request" } });
   if (error instanceof SyntaxError) return res.status(400).json({ error: { code: "INVALID_JSON", message: "The request body is not valid JSON." } });
+  if (error instanceof Prisma.PrismaClientInitializationError) {
+    console.error("Database connection initialization failed", {
+      code: error.errorCode ?? "UNKNOWN",
+      clientVersion: error.clientVersion,
+    });
+    return res.status(503).json({ error: { code: "DATABASE_UNAVAILABLE", message: "The database is temporarily unavailable." } });
+  }
   if (typeof error === "object" && error !== null && "code" in error && error.code === "P2002") {
     return res.status(409).json({ error: { code: "CONFLICT", message: "A record with the supplied unique value already exists." } });
   }

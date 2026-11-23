@@ -10,6 +10,8 @@
     "test": "vitest run src",
     "prisma:migrate": "prisma migrate dev",
     "prisma:deploy": "prisma migrate deploy",
+    "prisma:neon:status": "node scripts/neon-prisma.mjs status",
+    "prisma:neon:deploy": "node scripts/neon-prisma.mjs deploy",
     "prisma:seed": "tsx prisma/seed.ts",
     "auth:bootstrap-admin": "tsx prisma/bootstrap-admin.ts"
   },

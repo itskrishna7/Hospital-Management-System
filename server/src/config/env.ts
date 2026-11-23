@@ -3,6 +3,7 @@ import { z } from "zod";
 
 const schema = z.object({
   DATABASE_URL: z.string().min(1),
+  DIRECT_URL: z.string().url().optional(),
   CLIENT_ORIGIN: z.string().url().refine((value) => new URL(value).origin === value, "CLIENT_ORIGIN must be an origin without a path.").default("http://localhost:5173"),
   PORT: z.coerce.number().int().positive().default(4000),
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),

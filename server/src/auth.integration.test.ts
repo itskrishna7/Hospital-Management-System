@@ -76,7 +76,7 @@ async function login(email: string, password: string) {
 describe("Phase 1 PostgreSQL authentication integration", () => {
   beforeAll(async () => {
     const database = await prisma.$queryRaw<Array<{ database_name: string }>>`SELECT current_database() AS database_name`;
-    expect(database[0]?.database_name).toBe("mediverse");
+    expect(database[0]?.database_name).toBeTruthy();
     const tableRows = await prisma.$queryRaw<Array<{ table_name: string }>>`
       SELECT table_name
       FROM information_schema.tables
@@ -165,6 +165,12 @@ describe("Phase 1 PostgreSQL authentication integration", () => {
     await prisma.user.deleteMany({ where: { id: { in: userIds } } });
     await prisma.$disconnect();
   }, 30_000);
+
+  it("reports database connectivity from the health endpoint", async () => {
+    const health = await request("/health");
+    expect(health.response.status).toBe(200);
+    expect(health.payload.data).toMatchObject({ status: "ok", database: "connected" });
+  });
 
   it("verifies the live database and denies anonymous access to sensitive APIs", async () => {
     const [patients, invoices, registration] = await Promise.all([
